@@ -127,15 +127,8 @@ static int dfu_write_buffer_drain(struct dfu_entity *dfu)
 	return ret;
 }
 
-int dfu_flush(struct dfu_entity *dfu, void *buf, int size, int blk_seq_num)
+void dfu_write_transaction_cleanup(struct dfu_entity *dfu)
 {
-	int ret = 0;
-
-	if (dfu->flush_medium)
-		ret = dfu->flush_medium(dfu);
-
-	printf("\nDFU complete CRC32: 0x%08x\n", dfu->crc);
-
 	/* clear everything */
 	dfu_free_buf();
 	dfu->crc = 0;
@@ -145,14 +138,25 @@ int dfu_flush(struct dfu_entity *dfu, void *buf, int size, int blk_seq_num)
 	dfu->i_buf_end = dfu_buf;
 	dfu->i_buf = dfu->i_buf_start;
 	dfu->inited = 0;
+}
+
+int dfu_flush(struct dfu_entity *dfu, void *buf, int size, int blk_seq_num)
+{
+	int ret = 0;
+
+	if (dfu->flush_medium)
+		ret = dfu->flush_medium(dfu);
+
+	printf("\nDFU complete CRC32: 0x%08x\n", dfu->crc);
+
+	dfu_write_transaction_cleanup(dfu);
 
 	return ret;
 }
 
 int dfu_write(struct dfu_entity *dfu, void *buf, int size, int blk_seq_num)
 {
-	int ret = 0;
-	int tret;
+	int ret;
 
 	debug("%s: name: %s buf: 0x%p size: 0x%x p_num: 0x%x offset: 0x%llx bufoffset: 0x%x\n",
 	      __func__, dfu->name, buf, size, blk_seq_num, dfu->offset,
@@ -176,6 +180,7 @@ int dfu_write(struct dfu_entity *dfu, void *buf, int size, int blk_seq_num)
 	if (dfu->i_blk_seq_num != blk_seq_num) {
 		printf("%s: Wrong sequence number! [%d] [%d]\n",
 		       __func__, dfu->i_blk_seq_num, blk_seq_num);
+		dfu_write_transaction_cleanup(dfu);
 		return -1;
 	}
 
@@ -197,15 +202,18 @@ int dfu_write(struct dfu_entity *dfu, void *buf, int size, int blk_seq_num)
 
 	/* flush buffer if overflow */
 	if ((dfu->i_buf + size) > dfu->i_buf_end) {
-		tret = dfu_write_buffer_drain(dfu);
-		if (ret == 0)
-			ret = tret;
+		ret = dfu_write_buffer_drain(dfu);
+		if (ret) {
+			dfu_write_transaction_cleanup(dfu);
+			return ret;
+		}
 	}
 
 	/* we should be in buffer now (if not then size too large) */
 	if ((dfu->i_buf + size) > dfu->i_buf_end) {
 		error("Buffer overflow! (0x%p + 0x%x > 0x%p)\n", dfu->i_buf,
 		      size, dfu->i_buf_end);
+		dfu_write_transaction_cleanup(dfu);
 		return -1;
 	}
 
@@ -214,12 +222,14 @@ int dfu_write(struct dfu_entity *dfu, void *buf, int size, int blk_seq_num)
 
 	/* if end or if buffer full flush */
 	if (size == 0 || (dfu->i_buf + size) > dfu->i_buf_end) {
-		tret = dfu_write_buffer_drain(dfu);
-		if (ret == 0)
-			ret = tret;
+		ret = dfu_write_buffer_drain(dfu);
+		if (ret) {
+			dfu_write_transaction_cleanup(dfu);
+			return ret;
+		}
 	}
 
-	return ret;
+	return 0;
 }
 
 static int dfu_read_buffer_fill(struct dfu_entity *dfu, void *buf, int size)
