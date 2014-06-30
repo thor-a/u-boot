@@ -289,7 +289,7 @@ static int ci_bounce(struct ci_req *ci_req, int in)
 align:
 	/* Use internal buffer for small payloads. */
 	if (req->length <= 64) {
-		ci_req->b_len = 64;
+		ci_req->b_len = roundup(req->length, ARCH_DMA_MINALIGN);
 		ci_req->b_buf = ci_req->b_fast;
 	} else {
 		ci_req->b_len = roundup(req->length, ARCH_DMA_MINALIGN);
