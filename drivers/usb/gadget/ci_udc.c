@@ -269,7 +269,8 @@ static int ci_ep_disable(struct usb_ep *ep)
 
 static int ci_bounce(struct ci_ep *ep, int in)
 {
-	uint32_t addr = (uint32_t)ep->req.buf;
+	struct usb_request *req = &ep->req;
+	uint32_t addr = (uint32_t)req->buf;
 	uint32_t ba;
 
 	/* Input buffer address is not aligned. */
@@ -277,27 +278,27 @@ static int ci_bounce(struct ci_ep *ep, int in)
 		goto align;
 
 	/* Input buffer length is not aligned. */
-	if (ep->req.length & (ARCH_DMA_MINALIGN - 1))
+	if (req->length & (ARCH_DMA_MINALIGN - 1))
 		goto align;
 
 	/* The buffer is well aligned, only flush cache. */
-	ep->b_len = ep->req.length;
-	ep->b_buf = ep->req.buf;
+	ep->b_len = req->length;
+	ep->b_buf = req->buf;
 	goto flush;
 
 align:
 	/* Use internal buffer for small payloads. */
-	if (ep->req.length <= 64) {
+	if (req->length <= 64) {
 		ep->b_len = 64;
 		ep->b_buf = ep->b_fast;
 	} else {
-		ep->b_len = roundup(ep->req.length, ARCH_DMA_MINALIGN);
+		ep->b_len = roundup(req->length, ARCH_DMA_MINALIGN);
 		ep->b_buf = memalign(ARCH_DMA_MINALIGN, ep->b_len);
 		if (!ep->b_buf)
 			return -ENOMEM;
 	}
 	if (in)
-		memcpy(ep->b_buf, ep->req.buf, ep->req.length);
+		memcpy(ep->b_buf, req->buf, req->length);
 
 flush:
 	ba = (uint32_t)ep->b_buf;
@@ -308,7 +309,8 @@ flush:
 
 static void ci_debounce(struct ci_ep *ep, int in)
 {
-	uint32_t addr = (uint32_t)ep->req.buf;
+	struct usb_request *req = &ep->req;
+	uint32_t addr = (uint32_t)req->buf;
 	uint32_t ba = (uint32_t)ep->b_buf;
 
 	if (in) {
@@ -321,7 +323,7 @@ static void ci_debounce(struct ci_ep *ep, int in)
 	if (addr == ba)
 		return;		/* not a bounce */
 
-	memcpy(ep->req.buf, ep->b_buf, ep->req.actual);
+	memcpy(req->buf, ep->b_buf, req->actual);
 free:
 	/* Large payloads use allocated buffer, free it. */
 	if (ep->b_buf != ep->b_fast)
