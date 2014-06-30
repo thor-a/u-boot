@@ -209,9 +209,15 @@ ci_ep_alloc_request(struct usb_ep *ep, unsigned int gfp_flags)
 	return &ci_ep->req.req;
 }
 
-static void ci_ep_free_request(struct usb_ep *ep, struct usb_request *_req)
+static void ci_ep_free_request(struct usb_ep *ep, struct usb_request *req)
 {
-	return;
+	struct ci_req *ci_req;
+
+	ci_req = container_of(req, struct ci_req, req);
+	if (ci_req->b_buf) {
+		free(ci_req->b_buf);
+		ci_req->b_buf = NULL;
+	}
 }
 
 static void ep_enable(int num, int in, int maxpacket)
@@ -271,7 +277,8 @@ static int ci_bounce(struct ci_req *ci_req, int in)
 {
 	struct usb_request *req = &ci_req->req;
 	uint32_t addr = (uint32_t)req->buf;
-	uint32_t ba;
+	uint32_t hwaddr;
+	uint32_t aligned_used_len;
 
 	/* Input buffer address is not aligned. */
 	if (addr & (ARCH_DMA_MINALIGN - 1))
@@ -282,27 +289,31 @@ static int ci_bounce(struct ci_req *ci_req, int in)
 		goto align;
 
 	/* The buffer is well aligned, only flush cache. */
-	ci_req->b_len = req->length;
-	ci_req->b_buf = req->buf;
+	ci_req->hw_len = req->length;
+	ci_req->hw_buf = req->buf;
 	goto flush;
 
 align:
-	/* Use internal buffer for small payloads. */
-	if (req->length <= 64) {
-		ci_req->b_len = roundup(req->length, ARCH_DMA_MINALIGN);
-		ci_req->b_buf = ci_req->b_fast;
-	} else {
+	if (ci_req->b_buf && req->length > ci_req->b_len) {
+		free(ci_req->b_buf);
+		ci_req->b_buf = 0;
+	}
+	if (!ci_req->b_buf) {
 		ci_req->b_len = roundup(req->length, ARCH_DMA_MINALIGN);
 		ci_req->b_buf = memalign(ARCH_DMA_MINALIGN, ci_req->b_len);
 		if (!ci_req->b_buf)
 			return -ENOMEM;
 	}
+	ci_req->hw_len = ci_req->b_len;
+	ci_req->hw_buf = ci_req->b_buf;
+
 	if (in)
-		memcpy(ci_req->b_buf, req->buf, req->length);
+		memcpy(ci_req->hw_buf, req->buf, req->length);
 
 flush:
-	ba = (uint32_t)ci_req->b_buf;
-	flush_dcache_range(ba, ba + ci_req->b_len);
+	hwaddr = (uint32_t)ci_req->hw_buf;
+	aligned_used_len = roundup(req->length, ARCH_DMA_MINALIGN);
+	flush_dcache_range(hwaddr, hwaddr + aligned_used_len);
 
 	return 0;
 }
@@ -311,25 +322,19 @@ static void ci_debounce(struct ci_req *ci_req, int in)
 {
 	struct usb_request *req = &ci_req->req;
 	uint32_t addr = (uint32_t)req->buf;
-	uint32_t ba = (uint32_t)ci_req->b_buf;
+	uint32_t hwaddr = (uint32_t)ci_req->hw_buf;
 	uint32_t aligned_used_len;
 
-	if (in) {
-		if (addr == ba)
-			return;		/* not a bounce */
-		goto free;
-	}
+	if (in)
+		return;
+
 	aligned_used_len = roundup(req->actual, ARCH_DMA_MINALIGN);
-	invalidate_dcache_range(ba, ba + aligned_used_len);
+	invalidate_dcache_range(hwaddr, hwaddr + aligned_used_len);
 
-	if (addr == ba)
-		return;		/* not a bounce */
+	if (addr == hwaddr)
+		return; /* not a bounce */
 
-	memcpy(req->buf, ci_req->b_buf, req->actual);
-free:
-	/* Large payloads use allocated buffer, free it. */
-	if (ci_req->b_buf != ci_req->b_fast)
-		free(ci_req->b_buf);
+	memcpy(req->buf, ci_req->hw_buf, req->actual);
 }
 
 static int ci_ep_queue(struct usb_ep *ep,
@@ -354,18 +359,18 @@ static int ci_ep_queue(struct usb_ep *ep,
 
 	item->next = TERMINATE;
 	item->info = INFO_BYTES(len) | INFO_IOC | INFO_ACTIVE;
-	item->page0 = (uint32_t)ci_req->b_buf;
-	item->page1 = ((uint32_t)ci_req->b_buf & 0xfffff000) + 0x1000;
-	item->page2 = ((uint32_t)ci_req->b_buf & 0xfffff000) + 0x2000;
-	item->page3 = ((uint32_t)ci_req->b_buf & 0xfffff000) + 0x3000;
-	item->page4 = ((uint32_t)ci_req->b_buf & 0xfffff000) + 0x4000;
+	item->page0 = (uint32_t)ci_req->hw_buf;
+	item->page1 = ((uint32_t)ci_req->hw_buf & 0xfffff000) + 0x1000;
+	item->page2 = ((uint32_t)ci_req->hw_buf & 0xfffff000) + 0x2000;
+	item->page3 = ((uint32_t)ci_req->hw_buf & 0xfffff000) + 0x3000;
+	item->page4 = ((uint32_t)ci_req->hw_buf & 0xfffff000) + 0x4000;
 	ci_flush_qtd(num);
 
 	head->next = (unsigned) item;
 	head->info = 0;
 
 	DBG("ept%d %s queue len %x, buffer %p\n",
-	    num, in ? "in" : "out", len, ci_ep->b_buf);
+	    num, in ? "in" : "out", len, ci_ep->hw_buf);
 	ci_flush_qh(num);
 
 	if (in)

@@ -79,9 +79,12 @@ struct ci_udc {
 
 struct ci_req {
 	struct usb_request	req;
+	/* Bounce buffer allocated if needed to align the transfer */
 	uint8_t *b_buf;
 	uint32_t b_len;
-	uint8_t b_fast[64] __aligned(ARCH_DMA_MINALIGN);
+	/* Buffer for the current transfer. Either req.buf/len or b_buf/len */
+	uint8_t *hw_buf;
+	uint32_t hw_len;
 };
 
 struct ci_ep {
