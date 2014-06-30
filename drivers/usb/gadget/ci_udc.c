@@ -394,15 +394,15 @@ static void handle_ep_complete(struct ci_ep *ep)
 		       num, in ? "in" : "out", item->info, item->page0);
 
 	len = (item->info >> 16) & 0x7fff;
-	ep->req.req.actual = ep->req.req.length - len;
+	ci_req->req.actual = ci_req->req.length - len;
 	ci_debounce(ci_req, in);
 
 	DBG("ept%d %s complete %x\n",
 			num, in ? "in" : "out", len);
-	ep->req.req.complete(&ep->ep, &ep->req.req);
+	ci_req->req.complete(&ep->ep, &ci_req->req);
 	if (num == 0) {
-		ep->req.req.length = 0;
-		usb_ep_queue(&ep->ep, &ep->req.req, 0);
+		ci_req->req.length = 0;
+		usb_ep_queue(&ep->ep, &ci_req->req, 0);
 		ep->desc = &ep0_in_desc;
 	}
 }
