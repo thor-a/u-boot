@@ -77,12 +77,16 @@ struct ci_udc {
 #define CTRL_TXT_BULK	(2 << 18)
 #define CTRL_RXT_BULK	(2 << 2)
 
+struct ci_req {
+	struct usb_request	req;
+};
+
 struct ci_ep {
 	struct usb_ep ep;
 	struct list_head queue;
 	const struct usb_endpoint_descriptor *desc;
 
-	struct usb_request req;
+	struct ci_req req;
 	uint8_t *b_buf;
 	uint32_t b_len;
 	uint8_t b_fast[64] __aligned(ARCH_DMA_MINALIGN);

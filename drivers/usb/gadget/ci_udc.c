@@ -206,7 +206,7 @@ static struct usb_request *
 ci_ep_alloc_request(struct usb_ep *ep, unsigned int gfp_flags)
 {
 	struct ci_ep *ci_ep = container_of(ep, struct ci_ep, ep);
-	return &ci_ep->req;
+	return &ci_ep->req.req;
 }
 
 static void ci_ep_free_request(struct usb_ep *ep, struct usb_request *_req)
@@ -269,7 +269,8 @@ static int ci_ep_disable(struct usb_ep *ep)
 
 static int ci_bounce(struct ci_ep *ep, int in)
 {
-	struct usb_request *req = &ep->req;
+	struct ci_req *ci_req = &ep->req;
+	struct usb_request *req = &ci_req->req;
 	uint32_t addr = (uint32_t)req->buf;
 	uint32_t ba;
 
@@ -309,7 +310,8 @@ flush:
 
 static void ci_debounce(struct ci_ep *ep, int in)
 {
-	struct usb_request *req = &ep->req;
+	struct ci_req *ci_req = &ep->req;
+	struct usb_request *req = &ci_req->req;
 	uint32_t addr = (uint32_t)req->buf;
 	uint32_t ba = (uint32_t)ep->b_buf;
 
@@ -390,15 +392,15 @@ static void handle_ep_complete(struct ci_ep *ep)
 		       num, in ? "in" : "out", item->info, item->page0);
 
 	len = (item->info >> 16) & 0x7fff;
-	ep->req.actual = ep->req.length - len;
+	ep->req.req.actual = ep->req.req.length - len;
 	ci_debounce(ep, in);
 
 	DBG("ept%d %s complete %x\n",
 			num, in ? "in" : "out", len);
-	ep->req.complete(&ep->ep, &ep->req);
+	ep->req.req.complete(&ep->ep, &ep->req.req);
 	if (num == 0) {
-		ep->req.length = 0;
-		usb_ep_queue(&ep->ep, &ep->req, 0);
+		ep->req.req.length = 0;
+		usb_ep_queue(&ep->ep, &ep->req.req, 0);
 		ep->desc = &ep0_in_desc;
 	}
 }
@@ -407,7 +409,7 @@ static void handle_ep_complete(struct ci_ep *ep)
 
 static void handle_setup(void)
 {
-	struct usb_request *req = &controller.ep[0].req;
+	struct usb_request *req = &controller.ep[0].req.req;
 	struct ci_udc *udc = (struct ci_udc *)controller.ctrl->hcor;
 	struct ept_queue_head *head;
 	struct usb_ctrlrequest r;
