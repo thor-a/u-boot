@@ -267,9 +267,8 @@ static int ci_ep_disable(struct usb_ep *ep)
 	return 0;
 }
 
-static int ci_bounce(struct ci_ep *ep, int in)
+static int ci_bounce(struct ci_req *ci_req, int in)
 {
-	struct ci_req *ci_req = &ep->req;
 	struct usb_request *req = &ci_req->req;
 	uint32_t addr = (uint32_t)req->buf;
 	uint32_t ba;
@@ -308,9 +307,8 @@ flush:
 	return 0;
 }
 
-static void ci_debounce(struct ci_ep *ep, int in)
+static void ci_debounce(struct ci_req *ci_req, int in)
 {
-	struct ci_req *ci_req = &ep->req;
 	struct usb_request *req = &ci_req->req;
 	uint32_t addr = (uint32_t)req->buf;
 	uint32_t ba = (uint32_t)ci_req->b_buf;
@@ -348,7 +346,7 @@ static int ci_ep_queue(struct usb_ep *ep,
 	head = ci_get_qh(num, in);
 	len = req->length;
 
-	ret = ci_bounce(ci_ep, in);
+	ret = ci_bounce(ci_req, in);
 	if (ret)
 		return ret;
 
@@ -382,6 +380,8 @@ static void handle_ep_complete(struct ci_ep *ep)
 {
 	struct ept_queue_item *item;
 	int num, in, len;
+	struct ci_req *ci_req = &ep->req;
+
 	num = ep->desc->bEndpointAddress & USB_ENDPOINT_NUMBER_MASK;
 	in = (ep->desc->bEndpointAddress & USB_DIR_IN) != 0;
 	if (num == 0)
@@ -395,7 +395,7 @@ static void handle_ep_complete(struct ci_ep *ep)
 
 	len = (item->info >> 16) & 0x7fff;
 	ep->req.req.actual = ep->req.req.length - len;
-	ci_debounce(ep, in);
+	ci_debounce(ci_req, in);
 
 	DBG("ept%d %s complete %x\n",
 			num, in ? "in" : "out", len);
