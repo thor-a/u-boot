@@ -206,18 +206,38 @@ static struct usb_request *
 ci_ep_alloc_request(struct usb_ep *ep, unsigned int gfp_flags)
 {
 	struct ci_ep *ci_ep = container_of(ep, struct ci_ep, ep);
-	return &ci_ep->req.req;
+	int num;
+	struct ci_req *ci_req;
+
+	num = ci_ep->desc->bEndpointAddress & USB_ENDPOINT_NUMBER_MASK;
+	if (num == 0 && controller.ep0_req)
+		return &controller.ep0_req->req;
+
+	ci_req = memalign(ARCH_DMA_MINALIGN, sizeof(*ci_req));
+	if (!ci_req)
+		return NULL;
+
+	ci_req->b_buf = 0;
+
+	if (num == 0)
+		controller.ep0_req = ci_req;
+
+	return &ci_req->req;
 }
 
 static void ci_ep_free_request(struct usb_ep *ep, struct usb_request *req)
 {
-	struct ci_req *ci_req;
+	struct ci_ep *ci_ep = container_of(ep, struct ci_ep, ep);
+	struct ci_req *ci_req = container_of(req, struct ci_req, req);
+	int num;
 
-	ci_req = container_of(req, struct ci_req, req);
-	if (ci_req->b_buf) {
+	num = ci_ep->desc->bEndpointAddress & USB_ENDPOINT_NUMBER_MASK;
+	if (num == 0)
+		controller.ep0_req = 0;
+
+	if (ci_req->b_buf)
 		free(ci_req->b_buf);
-		ci_req->b_buf = NULL;
-	}
+	free(ci_req);
 }
 
 static void ep_enable(int num, int in, int maxpacket)
@@ -345,12 +365,14 @@ static int ci_ep_queue(struct usb_ep *ep,
 	struct ept_queue_item *item;
 	struct ept_queue_head *head;
 	int bit, num, len, in, ret;
-	struct ci_req *ci_req = &ci_ep->req;
+	struct ci_req *ci_req = container_of(req, struct ci_req, req);
 
 	num = ci_ep->desc->bEndpointAddress & USB_ENDPOINT_NUMBER_MASK;
 	in = (ci_ep->desc->bEndpointAddress & USB_DIR_IN) != 0;
 	item = ci_get_qtd(num, in);
 	head = ci_get_qh(num, in);
+
+	ci_ep->current_req = ci_req;
 	len = req->length;
 
 	ret = ci_bounce(ci_req, in);
@@ -387,7 +409,7 @@ static void handle_ep_complete(struct ci_ep *ep)
 {
 	struct ept_queue_item *item;
 	int num, in, len;
-	struct ci_req *ci_req = &ep->req;
+	struct ci_req *ci_req = ep->current_req;
 
 	num = ep->desc->bEndpointAddress & USB_ENDPOINT_NUMBER_MASK;
 	in = (ep->desc->bEndpointAddress & USB_DIR_IN) != 0;
@@ -401,6 +423,7 @@ static void handle_ep_complete(struct ci_ep *ep)
 		       num, in ? "in" : "out", item->info, item->page0);
 
 	len = (item->info >> 16) & 0x7fff;
+	ep->current_req = 0;
 	ci_req->req.actual = ci_req->req.length - len;
 	ci_debounce(ci_req, in);
 
@@ -418,7 +441,9 @@ static void handle_ep_complete(struct ci_ep *ep)
 
 static void handle_setup(void)
 {
-	struct usb_request *req = &controller.ep[0].req.req;
+	struct ci_ep *ci_ep = &controller.ep[0];
+	struct ci_req *ci_req;
+	struct usb_request *req;
 	struct ci_udc *udc = (struct ci_udc *)controller.ctrl->hcor;
 	struct ept_queue_head *head;
 	struct usb_ctrlrequest r;
@@ -426,6 +451,9 @@ static void handle_setup(void)
 	int num, in, _num, _in, i;
 	char *buf;
 	head = ci_get_qh(0, 0);	/* EP0 OUT */
+
+	ci_req = controller.ep0_req;
+	req = &ci_req->req;
 
 	ci_invalidate_qh(0);
 	memcpy(&r, head->setup_data, sizeof(struct usb_ctrlrequest));
@@ -436,6 +464,8 @@ static void handle_setup(void)
 #endif
 	DBG("handle setup %s, %x, %x index %x value %x\n", reqname(r.bRequest),
 	    r.bRequestType, r.bRequest, r.wIndex, r.wValue);
+
+	ci_ep->current_req = 0;
 
 	switch (SETUP(r.bRequestType, r.bRequest)) {
 	case SETUP(USB_RECIP_ENDPOINT, USB_REQ_CLEAR_FEATURE):
@@ -723,6 +753,12 @@ static int ci_udc_probe(void)
 		       sizeof(*ci_ep_init));
 		list_add_tail(&controller.ep[i].ep.ep_list,
 			      &controller.gadget.ep_list);
+	}
+
+	ci_ep_alloc_request(&controller.ep[0].ep, 0);
+	if (!controller.ep0_req) {
+		free(controller.epts);
+		return -ENOMEM;
 	}
 
 	return 0;

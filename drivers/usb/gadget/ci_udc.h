@@ -90,13 +90,13 @@ struct ci_req {
 struct ci_ep {
 	struct usb_ep ep;
 	struct list_head queue;
+	struct ci_req *current_req;
 	const struct usb_endpoint_descriptor *desc;
-
-	struct ci_req req;
 };
 
 struct ci_drv {
 	struct usb_gadget		gadget;
+	struct ci_req			*ep0_req;
 	struct usb_gadget_driver	*driver;
 	struct ehci_ctrl		*ctrl;
 	struct ept_queue_head		*epts;
