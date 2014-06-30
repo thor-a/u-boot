@@ -217,6 +217,7 @@ ci_ep_alloc_request(struct usb_ep *ep, unsigned int gfp_flags)
 	if (!ci_req)
 		return NULL;
 
+	INIT_LIST_HEAD(&ci_req->queue);
 	ci_req->b_buf = 0;
 
 	if (num == 0)
@@ -357,27 +358,23 @@ static void ci_debounce(struct ci_req *ci_req, int in)
 	memcpy(req->buf, ci_req->hw_buf, req->actual);
 }
 
-static int ci_ep_queue(struct usb_ep *ep,
-		struct usb_request *req, gfp_t gfp_flags)
+static void ci_ep_submit_next_request(struct ci_ep *ci_ep)
 {
-	struct ci_ep *ci_ep = container_of(ep, struct ci_ep, ep);
 	struct ci_udc *udc = (struct ci_udc *)controller.ctrl->hcor;
 	struct ept_queue_item *item;
 	struct ept_queue_head *head;
-	int bit, num, len, in, ret;
-	struct ci_req *ci_req = container_of(req, struct ci_req, req);
+	int bit, num, len, in;
+	struct ci_req *ci_req;
+
+	ci_ep->req_primed = true;
 
 	num = ci_ep->desc->bEndpointAddress & USB_ENDPOINT_NUMBER_MASK;
 	in = (ci_ep->desc->bEndpointAddress & USB_DIR_IN) != 0;
 	item = ci_get_qtd(num, in);
 	head = ci_get_qh(num, in);
 
-	ci_ep->current_req = ci_req;
-	len = req->length;
-
-	ret = ci_bounce(ci_req, in);
-	if (ret)
-		return ret;
+	ci_req = list_first_entry(&ci_ep->queue, struct ci_req, queue);
+	len = ci_req->req.length;
 
 	item->next = TERMINATE;
 	item->info = INFO_BYTES(len) | INFO_IOC | INFO_ACTIVE;
@@ -391,8 +388,8 @@ static int ci_ep_queue(struct usb_ep *ep,
 	head->next = (unsigned) item;
 	head->info = 0;
 
-	DBG("ept%d %s queue len %x, buffer %p\n",
-	    num, in ? "in" : "out", len, ci_ep->hw_buf);
+	DBG("ept%d %s queue len %x, req %p, buffer %p\n",
+	    num, in ? "in" : "out", len, ci_req, ci_req->hw_buf);
 	ci_flush_qh(num);
 
 	if (in)
@@ -401,6 +398,44 @@ static int ci_ep_queue(struct usb_ep *ep,
 		bit = EPT_RX(num);
 
 	writel(bit, &udc->epprime);
+}
+
+static int ci_ep_queue(struct usb_ep *ep,
+		struct usb_request *req, gfp_t gfp_flags)
+{
+	struct ci_ep *ci_ep = container_of(ep, struct ci_ep, ep);
+	struct ci_req *ci_req = container_of(req, struct ci_req, req);
+	int in, ret;
+	int __maybe_unused num;
+
+	num = ci_ep->desc->bEndpointAddress & USB_ENDPOINT_NUMBER_MASK;
+	in = (ci_ep->desc->bEndpointAddress & USB_DIR_IN) != 0;
+
+	if (!num && ci_ep->req_primed) {
+		/*
+		 * The flipping of ep0 between IN and OUT relies on
+		 * ci_ep_queue consuming the current IN/OUT setting
+		 * immediately. If this is deferred to a later point when the
+		 * req is pulled out of ci_req->queue, then the IN/OUT setting
+		 * may have been changed since the req was queued, and state
+		 * will get out of sync. This condition doesn't occur today,
+		 * but could if bugs were introduced later, and this error
+		 * check will save a lot of debugging time.
+		 */
+		printf("%s: ep0 transaction already in progress\n", __func__);
+		return -EPROTO;
+	}
+
+	ret = ci_bounce(ci_req, in);
+	if (ret)
+		return ret;
+
+	DBG("ept%d %s pre-queue req %p, buffer %p\n",
+	    num, in ? "in" : "out", ci_req, ci_req->hw_buf);
+	list_add_tail(&ci_req->queue, &ci_ep->queue);
+
+	if (!ci_ep->req_primed)
+		ci_ep_submit_next_request(ci_ep);
 
 	return 0;
 }
@@ -409,7 +444,7 @@ static void handle_ep_complete(struct ci_ep *ep)
 {
 	struct ept_queue_item *item;
 	int num, in, len;
-	struct ci_req *ci_req = ep->current_req;
+	struct ci_req *ci_req;
 
 	num = ep->desc->bEndpointAddress & USB_ENDPOINT_NUMBER_MASK;
 	in = (ep->desc->bEndpointAddress & USB_DIR_IN) != 0;
@@ -418,17 +453,23 @@ static void handle_ep_complete(struct ci_ep *ep)
 	item = ci_get_qtd(num, in);
 	ci_invalidate_qtd(num);
 
+	len = (item->info >> 16) & 0x7fff;
 	if (item->info & 0xff)
 		printf("EP%d/%s FAIL info=%x pg0=%x\n",
 		       num, in ? "in" : "out", item->info, item->page0);
 
-	len = (item->info >> 16) & 0x7fff;
-	ep->current_req = 0;
+	ci_req = list_first_entry(&ep->queue, struct ci_req, queue);
+	list_del_init(&ci_req->queue);
+	ep->req_primed = false;
+
+	if (!list_empty(&ep->queue))
+		ci_ep_submit_next_request(ep);
+
 	ci_req->req.actual = ci_req->req.length - len;
 	ci_debounce(ci_req, in);
 
-	DBG("ept%d %s complete %x\n",
-			num, in ? "in" : "out", len);
+	DBG("ept%d %s req %p, complete %x\n",
+	    num, in ? "in" : "out", ci_req, len);
 	ci_req->req.complete(&ep->ep, &ci_req->req);
 	if (num == 0) {
 		ci_req->req.length = 0;
@@ -450,10 +491,10 @@ static void handle_setup(void)
 	int status = 0;
 	int num, in, _num, _in, i;
 	char *buf;
-	head = ci_get_qh(0, 0);	/* EP0 OUT */
 
 	ci_req = controller.ep0_req;
 	req = &ci_req->req;
+	head = ci_get_qh(0, 0);	/* EP0 OUT */
 
 	ci_invalidate_qh(0);
 	memcpy(&r, head->setup_data, sizeof(struct usb_ctrlrequest));
@@ -465,7 +506,8 @@ static void handle_setup(void)
 	DBG("handle setup %s, %x, %x index %x value %x\n", reqname(r.bRequest),
 	    r.bRequestType, r.bRequest, r.wIndex, r.wValue);
 
-	ci_ep->current_req = 0;
+	list_del_init(&ci_req->queue);
+	ci_ep->req_primed = false;
 
 	switch (SETUP(r.bRequestType, r.bRequest)) {
 	case SETUP(USB_RECIP_ENDPOINT, USB_REQ_CLEAR_FEATURE):
@@ -744,6 +786,8 @@ static int ci_udc_probe(void)
 	/* Init EP 0 */
 	memcpy(&controller.ep[0].ep, &ci_ep_init[0], sizeof(*ci_ep_init));
 	controller.ep[0].desc = &ep0_in_desc;
+	INIT_LIST_HEAD(&controller.ep[0].queue);
+	controller.ep[0].req_primed = false;
 	controller.gadget.ep0 = &controller.ep[0].ep;
 	INIT_LIST_HEAD(&controller.gadget.ep0->ep_list);
 
@@ -751,6 +795,8 @@ static int ci_udc_probe(void)
 	for (i = 1; i < NUM_ENDPOINTS; i++) {
 		memcpy(&controller.ep[i].ep, &ci_ep_init[1],
 		       sizeof(*ci_ep_init));
+		INIT_LIST_HEAD(&controller.ep[i].queue);
+		controller.ep[i].req_primed = false;
 		list_add_tail(&controller.ep[i].ep.ep_list,
 			      &controller.gadget.ep_list);
 	}

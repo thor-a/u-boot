@@ -79,6 +79,7 @@ struct ci_udc {
 
 struct ci_req {
 	struct usb_request	req;
+	struct list_head	queue;
 	/* Bounce buffer allocated if needed to align the transfer */
 	uint8_t *b_buf;
 	uint32_t b_len;
@@ -90,7 +91,7 @@ struct ci_req {
 struct ci_ep {
 	struct usb_ep ep;
 	struct list_head queue;
-	struct ci_req *current_req;
+	bool req_primed;
 	const struct usb_endpoint_descriptor *desc;
 };
 
