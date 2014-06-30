@@ -283,27 +283,27 @@ static int ci_bounce(struct ci_ep *ep, int in)
 		goto align;
 
 	/* The buffer is well aligned, only flush cache. */
-	ep->b_len = req->length;
-	ep->b_buf = req->buf;
+	ci_req->b_len = req->length;
+	ci_req->b_buf = req->buf;
 	goto flush;
 
 align:
 	/* Use internal buffer for small payloads. */
 	if (req->length <= 64) {
-		ep->b_len = 64;
-		ep->b_buf = ep->b_fast;
+		ci_req->b_len = 64;
+		ci_req->b_buf = ci_req->b_fast;
 	} else {
-		ep->b_len = roundup(req->length, ARCH_DMA_MINALIGN);
-		ep->b_buf = memalign(ARCH_DMA_MINALIGN, ep->b_len);
-		if (!ep->b_buf)
+		ci_req->b_len = roundup(req->length, ARCH_DMA_MINALIGN);
+		ci_req->b_buf = memalign(ARCH_DMA_MINALIGN, ci_req->b_len);
+		if (!ci_req->b_buf)
 			return -ENOMEM;
 	}
 	if (in)
-		memcpy(ep->b_buf, req->buf, req->length);
+		memcpy(ci_req->b_buf, req->buf, req->length);
 
 flush:
-	ba = (uint32_t)ep->b_buf;
-	flush_dcache_range(ba, ba + ep->b_len);
+	ba = (uint32_t)ci_req->b_buf;
+	flush_dcache_range(ba, ba + ci_req->b_len);
 
 	return 0;
 }
@@ -313,23 +313,23 @@ static void ci_debounce(struct ci_ep *ep, int in)
 	struct ci_req *ci_req = &ep->req;
 	struct usb_request *req = &ci_req->req;
 	uint32_t addr = (uint32_t)req->buf;
-	uint32_t ba = (uint32_t)ep->b_buf;
+	uint32_t ba = (uint32_t)ci_req->b_buf;
 
 	if (in) {
 		if (addr == ba)
 			return;		/* not a bounce */
 		goto free;
 	}
-	invalidate_dcache_range(ba, ba + ep->b_len);
+	invalidate_dcache_range(ba, ba + ci_req->b_len);
 
 	if (addr == ba)
 		return;		/* not a bounce */
 
-	memcpy(req->buf, ep->b_buf, req->actual);
+	memcpy(req->buf, ci_req->b_buf, req->actual);
 free:
 	/* Large payloads use allocated buffer, free it. */
-	if (ep->b_buf != ep->b_fast)
-		free(ep->b_buf);
+	if (ci_req->b_buf != ci_req->b_fast)
+		free(ci_req->b_buf);
 }
 
 static int ci_ep_queue(struct usb_ep *ep,
@@ -340,6 +340,8 @@ static int ci_ep_queue(struct usb_ep *ep,
 	struct ept_queue_item *item;
 	struct ept_queue_head *head;
 	int bit, num, len, in, ret;
+	struct ci_req *ci_req = &ci_ep->req;
+
 	num = ci_ep->desc->bEndpointAddress & USB_ENDPOINT_NUMBER_MASK;
 	in = (ci_ep->desc->bEndpointAddress & USB_DIR_IN) != 0;
 	item = ci_get_qtd(num, in);
@@ -352,11 +354,11 @@ static int ci_ep_queue(struct usb_ep *ep,
 
 	item->next = TERMINATE;
 	item->info = INFO_BYTES(len) | INFO_IOC | INFO_ACTIVE;
-	item->page0 = (uint32_t)ci_ep->b_buf;
-	item->page1 = ((uint32_t)ci_ep->b_buf & 0xfffff000) + 0x1000;
-	item->page2 = ((uint32_t)ci_ep->b_buf & 0xfffff000) + 0x2000;
-	item->page3 = ((uint32_t)ci_ep->b_buf & 0xfffff000) + 0x3000;
-	item->page4 = ((uint32_t)ci_ep->b_buf & 0xfffff000) + 0x4000;
+	item->page0 = (uint32_t)ci_req->b_buf;
+	item->page1 = ((uint32_t)ci_req->b_buf & 0xfffff000) + 0x1000;
+	item->page2 = ((uint32_t)ci_req->b_buf & 0xfffff000) + 0x2000;
+	item->page3 = ((uint32_t)ci_req->b_buf & 0xfffff000) + 0x3000;
+	item->page4 = ((uint32_t)ci_req->b_buf & 0xfffff000) + 0x4000;
 	ci_flush_qtd(num);
 
 	head->next = (unsigned) item;

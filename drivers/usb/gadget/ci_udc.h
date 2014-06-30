@@ -79,6 +79,9 @@ struct ci_udc {
 
 struct ci_req {
 	struct usb_request	req;
+	uint8_t *b_buf;
+	uint32_t b_len;
+	uint8_t b_fast[64] __aligned(ARCH_DMA_MINALIGN);
 };
 
 struct ci_ep {
@@ -87,9 +90,6 @@ struct ci_ep {
 	const struct usb_endpoint_descriptor *desc;
 
 	struct ci_req req;
-	uint8_t *b_buf;
-	uint32_t b_len;
-	uint8_t b_fast[64] __aligned(ARCH_DMA_MINALIGN);
 };
 
 struct ci_drv {
