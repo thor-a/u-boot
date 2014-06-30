@@ -312,13 +312,15 @@ static void ci_debounce(struct ci_req *ci_req, int in)
 	struct usb_request *req = &ci_req->req;
 	uint32_t addr = (uint32_t)req->buf;
 	uint32_t ba = (uint32_t)ci_req->b_buf;
+	uint32_t aligned_used_len;
 
 	if (in) {
 		if (addr == ba)
 			return;		/* not a bounce */
 		goto free;
 	}
-	invalidate_dcache_range(ba, ba + ci_req->b_len);
+	aligned_used_len = roundup(req->actual, ARCH_DMA_MINALIGN);
+	invalidate_dcache_range(ba, ba + aligned_used_len);
 
 	if (addr == ba)
 		return;		/* not a bounce */
